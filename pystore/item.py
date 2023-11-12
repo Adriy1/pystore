@@ -30,7 +30,7 @@ class Item(object):
 
     def __init__(self, item, datastore, collection,
                  snapshot=None, filters=None, columns=None,
-                 engine="fastparquet"):
+                 engine="fastparquet", calculate_divisions=True):
         self.engine = engine
         self.datastore = datastore
         self.collection = collection
@@ -58,7 +58,7 @@ class Item(object):
 
         self.metadata = utils.read_metadata(self._path)
         self.data = dd.read_parquet(
-            self._path, engine=self.engine, filters=filters, columns=columns)
+            self._path, engine=self.engine, filters=filters, columns=columns, calculate_divisions=calculate_divisions, ignore_metadata_file=True)
 
     def to_pandas(self, parse_dates=True):
         df = self.data.compute()

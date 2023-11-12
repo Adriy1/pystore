@@ -18,6 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
 import os
 import time
 import shutil
@@ -72,9 +73,9 @@ class Collection(object):
 
         return set(matched)
 
-    def item(self, item, snapshot=None, filters=None, columns=None):
+    def item(self, item, snapshot=None, filters=None, columns=None, calculate_divisions=True):
         return Item(item, self.datastore, self.collection,
-                    snapshot, filters, columns, engine=self.engine)
+                    snapshot, filters, columns, engine=self.engine, calculate_divisions=calculate_divisions)
 
     def index(self, item, last=False):
         data = dd.read_parquet(self._item_path(item, as_string=True),
@@ -96,15 +97,15 @@ class Collection(object):
     def write_threaded(self, item, data, metadata={},
                        npartitions=None, chunksize=None,
                        overwrite=False, epochdate=False,
-                       reload_items=False, **kwargs):
+                       reload_items=False, append=False, **kwargs):
         return self.write(item, data, metadata,
                           npartitions, chunksize, overwrite,
-                          epochdate, reload_items,
+                          epochdate, reload_items, append,
                           **kwargs)
 
     def write(self, item, data, metadata={},
               npartitions=None, chunksize=None, overwrite=False,
-              epochdate=False, reload_items=False,
+              epochdate=False, reload_items=False, append=False,
               **kwargs):
 
         if utils.path_exists(self._item_path(item)) and not overwrite:
@@ -138,7 +139,7 @@ class Collection(object):
                 data = dd.from_pandas(data, npartitions=npartitions)
 
         dd.to_parquet(data, self._item_path(item, as_string=True),
-                      compression="snappy", engine=self.engine, **kwargs)
+                      compression="snappy", engine=self.engine, append=append, ignore_divisions=True, **kwargs)
 
         utils.write_metadata(utils.make_path(
             self.datastore, self.collection, item), metadata)
@@ -149,7 +150,7 @@ class Collection(object):
             self._list_items_threaded()
 
     def append(self, item, data, npartitions=None, epochdate=False,
-               threaded=False, reload_items=False, **kwargs):
+               threaded=False, reload_items=False, skip_existing=True, **kwargs):
 
         if not utils.path_exists(self._item_path(item)):
             raise ValueError(
@@ -158,18 +159,21 @@ class Collection(object):
         # work on copy
         data = data.copy()
 
-        try:
-            if epochdate or ("datetime" in str(data.index.dtype) and
-                             any(data.index.nanosecond) > 0):
-                data = utils.datetime_to_int64(data)
-            old_index = dd.read_parquet(self._item_path(item, as_string=True),
-                                        columns=[], engine=self.engine
-                                        ).index.compute()
-            data = data[~data.index.isin(old_index)]
-        except Exception:
-            return
+        if skip_existing:
+            try:
+                if epochdate or ("datetime" in str(data.index.dtype) and
+                                 any(data.index.nanosecond) > 0):
+                    data = utils.datetime_to_int64(data)
+                old_index = dd.read_parquet(self._item_path(item, as_string=True),
+                                            columns=[], engine=self.engine
+                                            ).index.compute()
+                data = data[~data.index.isin(old_index)]
+            except Exception as e:
+                print(str(e))
+                return
 
-        if data.empty:
+        # if data.empty:
+        if len(data.index) == 0:
             return
 
         if data.index.name == "":
@@ -177,19 +181,26 @@ class Collection(object):
 
         # combine old dataframe with new
         current = self.item(item)
-        new = dd.from_pandas(data, npartitions=1)
-        combined = dd.concat([current.data, new]).drop_duplicates(keep="last")
+        if not isinstance(data, dd.DataFrame):
+            new = dd.from_pandas(data, npartitions=1)
+        else:
+            new = data
 
-        if npartitions is None:
-            memusage = combined.memory_usage(deep=True).sum()
-            if isinstance(combined, dd.DataFrame):
-                memusage = memusage.compute()
-            npartitions = int(1 + memusage // config.PARTITION_SIZE)
+        if not skip_existing:
+            combined = new
+        else:
+            combined = dd.concat([current.data, new]) # .drop_duplicates(keep="last")
+
+        # if npartitions is None:
+        #     memusage = combined.memory_usage(deep=True).sum()
+        #     if isinstance(combined, dd.DataFrame):
+        #         memusage = memusage.compute()
+        #     npartitions = int(1 + memusage // config.PARTITION_SIZE)
 
         # write data
         write = self.write_threaded if threaded else self.write
         write(item, combined, npartitions=npartitions, chunksize=None,
-              metadata=current.metadata, overwrite=True,
+              metadata=current.metadata, overwrite=True, append=not skip_existing,
               epochdate=epochdate, reload_items=reload_items, **kwargs)
 
     def create_snapshot(self, snapshot=None):
