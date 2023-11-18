@@ -127,27 +127,22 @@ class Collection(object):
         if data.index.name == "":
             data.index.name = "index"
 
-        if npartitions is None:
-            memusage = data.memory_usage(deep=True).sum()
-            if isinstance(data, dd.DataFrame):
-                npartitions = int(
-                    1 + memusage.compute() // config.PARTITION_SIZE)
-                data = data.repartition(npartitions=npartitions)
-            else:
-                npartitions = int(
-                    1 + memusage // config.PARTITION_SIZE)
-                data = dd.from_pandas(data, npartitions=npartitions)
+        # if npartitions is None:
+        #     memusage = data.memory_usage(deep=True).sum()
+        #     if isinstance(data, dd.DataFrame):
+        #         npartitions = int(
+        #             1 + memusage.compute() // config.PARTITION_SIZE)
+        #         data.repartition(npartitions=npartitions)
+        #     else:
+        #         npartitions = int(
+        #             1 + memusage // config.PARTITION_SIZE)
+        if isinstance(data, dd.DataFrame):
+            data.repartition(1)
         else:
-            if not isinstance(data, dd.DataFrame):
-                data = dd.from_pandas(data, npartitions=npartitions)
+            data = dd.from_pandas(data, npartitions=1)
 
-<<<<<<< HEAD
-        dd.to_parquet(data, self._item_path(item, as_string=True), overwrite=overwrite,
-                      compression="snappy", engine=self.engine, **kwargs)
-=======
         dd.to_parquet(data, self._item_path(item, as_string=True),
                       compression="snappy", engine=self.engine, append=append, ignore_divisions=True, **kwargs)
->>>>>>> cc84e5a (Custom patch for divisions and faster ingest)
 
         utils.write_metadata(utils.make_path(
             self.datastore, self.collection, item), metadata)
