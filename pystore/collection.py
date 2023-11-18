@@ -127,16 +127,19 @@ class Collection(object):
         if data.index.name == "":
             data.index.name = "index"
 
-        if npartitions is None and chunksize is None:
-            memusage = data.memory_usage(deep=True).sum()
-            if isinstance(data, dd.DataFrame):
-                npartitions = int(
-                    1 + memusage.compute() // config.PARTITION_SIZE)
-                data.repartition(npartitions=npartitions)
-            else:
-                npartitions = int(
-                    1 + memusage // config.PARTITION_SIZE)
-                data = dd.from_pandas(data, npartitions=npartitions)
+        # if npartitions is None and chunksize is None:
+        #     memusage = data.memory_usage(deep=True).sum()
+        #     if isinstance(data, dd.DataFrame):
+        #         npartitions = int(
+        #             1 + memusage.compute() // config.PARTITION_SIZE)
+        #         data.repartition(npartitions=npartitions)
+        #     else:
+        #         npartitions = int(
+        #             1 + memusage // config.PARTITION_SIZE)
+        if isinstance(data, dd.DataFrame):
+            data.repartition(1)
+        else:
+            data = dd.from_pandas(data, npartitions=1)
 
         dd.to_parquet(data, self._item_path(item, as_string=True),
                       compression="snappy", engine=self.engine, append=append, ignore_divisions=True, **kwargs)
