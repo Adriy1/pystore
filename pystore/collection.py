@@ -22,6 +22,7 @@ import datetime
 import os
 import time
 import shutil
+import uuid
 import dask.dataframe as dd
 import multitasking
 
@@ -137,9 +138,14 @@ class Collection(object):
         #         npartitions = int(
         #             1 + memusage // config.PARTITION_SIZE)
         if isinstance(data, dd.DataFrame):
-            data.repartition(1)
+            # repartition()'s first positional argument is `divisions`, so the
+            # count has to be passed by keyword. Leaving the frame alone when no
+            # count is asked for keeps concatenated frames from being collapsed
+            # into a single in-memory partition.
+            if npartitions:
+                data = data.repartition(npartitions=npartitions)
         else:
-            data = dd.from_pandas(data, npartitions=1)
+            data = dd.from_pandas(data, npartitions=npartitions or 1)
 
         dd.to_parquet(data, self._item_path(item, as_string=True),
                       compression="snappy", engine=self.engine, append=append, ignore_divisions=True, **kwargs)
@@ -182,43 +188,44 @@ class Collection(object):
         if data.index.name == "":
             data.index.name = "index"
 
-        # combine old dataframe with new
-        current = self.item(item)
         if not isinstance(data, dd.DataFrame):
-            new = dd.from_pandas(data, npartitions=1)
+            new = dd.from_pandas(data, npartitions=npartitions or 1)
+        elif npartitions:
+            new = data.repartition(npartitions=npartitions)
         else:
             new = data
 
-        if not skip_existing:
-            combined = new
-        else:
-            combined = dd.concat([current.data, new]) # .drop_duplicates(keep="last")
+        # Store the new rows as extra files inside the existing dataset instead
+        # of concatenating them with what is already stored and rewriting the
+        # whole item: the cost is the size of `data`, not the size of the item.
+        # `skip_existing` has already dropped rows whose index is present, so
+        # nothing is gained by rewriting. (The old concat path cannot run on
+        # dask >= 2025 in any case: dd.concat() of a parquet read and an
+        # in-memory frame fails to generate metadata for categorical dtypes.)
+        #
+        # Filenames have to be unique, or a second append would overwrite the
+        # `part.0.parquet` that the first one wrote. Callers that pass their own
+        # deterministic `name_function` get idempotent re-writes instead, which
+        # is what makes re-ingesting the same day safe.
+        #
+        # Because each append writes its own files rather than rewriting the item,
+        # `data` must carry the same dtypes as what is already stored: a column
+        # that is categorical in one file and a string in another makes the
+        # dataset unreadable. Build every batch the same way.
+        kwargs.setdefault(
+            "name_function",
+            lambda i, uid=uuid.uuid4().hex[:12]: "%s.part.%s.parquet" % (uid, i))
 
-        # if npartitions is None:
-        #     memusage = combined.memory_usage(deep=True).sum()
-        #     if isinstance(combined, dd.DataFrame):
-        #         memusage = memusage.compute()
-        #     npartitions = int(1 + memusage // config.PARTITION_SIZE)
+        # `threaded` is still accepted for backwards compatibility, but the write
+        # is now a single dask call and no longer needs the threaded wrapper.
+        dd.to_parquet(new, self._item_path(item, as_string=True),
+                      compression="snappy", engine=self.engine,
+                      ignore_divisions=True, **kwargs)
 
-        combined = combined.repartition(npartitions=npartitions).drop_duplicates(
-            keep="last"
-            )
-        tmp_item = "__" + item
-        # write data
-        write = self.write_threaded if threaded else self.write
-        write(item, combined, npartitions=npartitions,
-              metadata=current.metadata, overwrite=True, append=not skip_existing,
-              epochdate=epochdate, reload_items=reload_items, **kwargs)
-
-        try:
-            multitasking.wait_for_tasks()
-            self.delete_item(item=item,reload_items=False)
-            shutil.move(self._item_path(tmp_item),self._item_path(item))
+        # update items
+        self.items.add(item)
+        if reload_items:
             self._list_items_threaded()
-        except Exception as errn:
-            raise ValueError(
-                "Error: %s" % repr(errn)
-            ) from errn
 
     def create_snapshot(self, snapshot=None):
         if snapshot:
